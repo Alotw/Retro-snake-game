@@ -1,0 +1,622 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>貪吃蛇遊戲 (復古終端機版)</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+    body {
+      background-color: #050505;
+      color: #cccccc;
+      font-family: "Courier New", Courier, monospace, "Microsoft JhengHei";
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      overflow: hidden;
+      user-select: none;
+    }
+    #game-container {
+      background-color: #000000;
+      border: 2px solid #333333;
+      box-shadow: 0 0 20px rgba(0, 255, 0, 0.15);
+      padding: 15px;
+      border-radius: 6px;
+    }
+    #screen {
+      white-space: pre;
+      font-size: 16px;
+      line-height: 1.15;
+      letter-spacing: 0px;
+      font-weight: bold;
+    }
+    .food { color: #ff4d4d; }
+    .wall { color: #aaaaaa; }
+    .head { color: #ffffff; }
+    .body { color: #cccccc; }
+    .info { color: #4da6ff; }
+    .prompt { color: #ffff66; }
+  </style>
+</head>
+<body>
+
+<div id="game-container">
+  <div id="screen"></div>
+</div>
+
+<!-- 下載 Windows 電腦版連結 -->
+<div style="margin-top: 15px; text-align: center; font-size: 14px;">
+  <a href="snake-game-windows.zip" download style="color: #4da6ff; text-decoration: underline;">
+    💾 下載 Windows 電腦版 (.zip)
+  </a>
+</div>
+
+<script>
+// --- 常數定義 ---
+const W = 50; // 地圖寬度
+const H = 20; // 地圖高度
+const S = 0, L = 1, R = 2, U = 3, D = 4; // 方向常數
+
+// --- 遊戲狀態變數 ---
+let gameover = false;
+let isDemo = false;
+let demoTotalSeconds = 20;
+let demoStartTime = 0;
+let x, y, cx, cy, score;
+let ntl = 0; // 蛇身節數
+let tx = new Array(100).fill(0);
+let ty = new Array(100).fill(0);
+let direction = S;
+let lastdirection = S;
+
+// 模式與速度設定 (預設一般版 d_t=150，慢速版 d_t=200)
+let selectedMode = "NORMAL"; // "NORMAL" 或 "SLOW"
+let d_t = 150; 
+
+// 系統狀態控制
+let gameState = "FIRSTMO"; // FIRSTMO, DEMO, MANUAL, LASTMO
+let cmdBuffer = "";
+let exitChar = "";
+let isEscExit = false;
+let gameLoopTimer = null;
+
+// --- 音效處理 (Web Audio API) ---
+let audioCtx = null;
+
+function initAudio() {
+  if (!audioCtx) {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  }
+  if (audioCtx.state === 'suspended') {
+    audioCtx.resume();
+  }
+}
+
+function playBeep(freq, durationMs) {
+  try {
+    initAudio();
+    let osc = audioCtx.createOscillator();
+    let gain = audioCtx.createGain();
+
+    osc.type = 'triangle'; // 柔和三角波
+    let adjustedFreq = freq;
+
+    osc.frequency.setValueAtTime(adjustedFreq, audioCtx.currentTime);
+    gain.gain.setValueAtTime(selectedMode === "SLOW" ? 0.4 : 0.3, audioCtx.currentTime);
+
+    osc.connect(gain);
+    gain.connect(audioCtx.destination);
+    osc.start();
+    osc.stop(audioCtx.currentTime + (durationMs / 1000));
+  } catch (e) {}
+}
+
+// --- 遊戲核心副程式 ---
+
+function setup() {
+  gameover = false;
+  direction = S;      // 預設停止
+  lastdirection = S;  // 預設無方向，確保四個方向均可開局
+  score = 0;
+  ntl = 0;
+  x = Math.floor(W / 2);
+  y = Math.floor(H / 2);
+
+  for (let i = 0; i < 100; i++) {
+    tx[i] = 0;
+    ty[i] = 0;
+  }
+
+  let op;
+  do {
+    op = false;
+    cx = Math.floor(Math.random() * (W - 2)) + 1;
+    cy = Math.floor(Math.random() * (H - 2)) + 1;
+
+    if (cx === x && cy === y) {
+      op = true;
+    } else {
+      for (let i = 0; i < ntl; i++) {
+        if (tx[i] === cx && ty[i] === cy) {
+          op = true;
+          break;
+        }
+      }
+    }
+  } while (op);
+}
+
+// 畫面繪製副程式
+function renderScreen() {
+  let screenHTML = "";
+
+  if (gameState === "FIRSTMO") {
+    screenHTML += "貪吃蛇遊戲\n\n";
+    screenHTML += "遊戲說明:\n";
+    screenHTML += `1. 遊戲開始前會先有自動模擬${demoTotalSeconds}秒，結束時有提示音，然後可直接遊玩\n`;
+    screenHTML += "2. 請用W(向上)、A(向左)、S(向下)、D(向右)操控蛇頭「§」去吃食物「@」(@是紅色的)\n";
+    screenHTML += "3. 可用P暫停遊戲，暫停完直接操控即可\n";
+    screenHTML += "4. 若撞牆或撞到身體(0)，蛇會死亡，遊戲就會結束\n";
+
+    // 依模式動態切換第 5 點說明
+    if (selectedMode === "NORMAL") {
+      screenHTML += "5. 若直接讓蛇走相反方向就會死亡\n";
+    } else {
+      screenHTML += "5. 若直接讓蛇走相反方向將不會有任何動作，並會有提示音\n";
+    }
+
+    screenHTML += "6. 吃到食物和死亡都會有聲音，其中死亡聲音較高\n";
+    screenHTML += "7. 若想立即結束遊戲，不論何時請按Esc，然後按Enter關閉遊戲或依螢幕提示從新開始\n";
+    screenHTML += "8. 任何操作都必須使用英文鍵盤輸入\n\n";
+
+    screenHTML += "【遊戲模式選擇】:\n";
+    screenHTML += `  按 [1] : 一般版 ${selectedMode === "NORMAL" ? "<span class=\"prompt\">[已選擇]</span>" : ""}\n`;
+    screenHTML += `  按 [2] : 慢速版 ${selectedMode === "SLOW" ? "<span class=\"prompt\">[已選擇]</span>" : ""}\n\n`;
+
+    screenHTML += "若已了解遊戲說明請按Enter開始遊戲\n";
+    screenHTML += `<span class="prompt">${escapeHTML(cmdBuffer)}</span>`;
+    document.getElementById("screen").innerHTML = screenHTML;
+    return;
+  }
+
+  if (gameState === "LASTMO") {
+    screenHTML += `\nGame Over! 最終得分: ${score}\n\n`;
+    screenHTML += "要再玩一次嗎?\n";
+    screenHTML += "直接再玩一次請輸入:Y/y \n從遊戲說明開始請輸入:R/r \n";
+    screenHTML += "結束遊戲請輸入任意字元，並按下Enter\n";
+    screenHTML += "請輸入: ";
+    if (exitChar !== "") {
+      screenHTML += `<span class="prompt">${escapeHTML(exitChar)}</span>`;
+    }
+    document.getElementById("screen").innerHTML = screenHTML;
+    return;
+  }
+
+  // 遊戲進行中（Demo 或 手動模式）
+  let modeTag = selectedMode === "NORMAL" ? "一般版" : "慢速版";
+  if (isDemo) {
+    let elapsed = Math.floor((Date.now() - demoStartTime) / 1000);
+    let remain = demoTotalSeconds - elapsed;
+    if (remain < 0) remain = 0;
+    screenHTML += `目前得分: ${score} (${modeTag})  <span class="info">[自動模擬中，剩餘${remain}秒]</span>\n`;
+  } else {
+    screenHTML += `目前得分: ${score} (${modeTag})\n`;
+  }
+
+  // 上邊框
+  screenHTML += '<span class="wall">' + "#".repeat(W + 2) + '</span>\n';
+
+  for (let i = 0; i < H; i++) {
+    screenHTML += '<span class="wall">#</span>';
+    for (let j = 0; j < W; j++) {
+      if (i === y && j === x) {
+        screenHTML += '<span class="head">§</span>';
+      } else if (i === cy && j === cx) {
+        screenHTML += '<span class="food">@</span>';
+      } else {
+        let prsk = false;
+        for (let k = 0; k < ntl; k++) {
+          if (tx[k] === j && ty[k] === i) {
+            screenHTML += '<span class="body">0</span>';
+            prsk = true;
+            break;
+          }
+        }
+        if (!prsk) screenHTML += " ";
+      }
+    }
+    screenHTML += '<span class="wall">#</span>\n';
+  }
+
+  // 下邊框
+  screenHTML += '<span class="wall">' + "#".repeat(W + 2) + '</span>\n';
+
+  if (isDemo) {
+    screenHTML += `\n自動模擬時間為${demoTotalSeconds}秒\n`;
+  } else {
+    screenHTML += "\n請按WASDP操控遊戲\n";
+  }
+
+  document.getElementById("screen").innerHTML = screenHTML;
+}
+
+function escapeHTML(str) {
+  return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+// 轉向機制處理
+function setdirection(t, o) {
+  let cur = (direction === S) ? lastdirection : direction;
+
+  if (cur === o) {
+    if (ntl === 0) {
+      // 無身體時允許直接轉向
+      direction = t;
+      lastdirection = t;
+    } else {
+      // 有身體時的反向判定
+      if (selectedMode === "NORMAL") {
+        // 一般版：反向即死
+        gameover = true;
+        playBeep(3136, 40);
+      } else {
+        // 慢速版：防自殺警示音，不改方向也不死亡
+        playBeep(750, 50);
+      }
+    }
+  } else {
+    direction = t;
+    lastdirection = t;
+  }
+}
+
+// 蛇移動與碰撞邏輯
+function algorithm() {
+  if (direction === S) return;
+
+  let px = tx[0];
+  let py = ty[0];
+  let p2x, p2y;
+  tx[0] = x;
+  ty[0] = y;
+
+  for (let i = 1; i < ntl; i++) {
+    p2x = tx[i];
+    p2y = ty[i];
+    tx[i] = px;
+    ty[i] = py;
+    px = p2x;
+    py = p2y;
+  }
+
+  switch (direction) {
+    case L: x--; break;
+    case R: x++; break;
+    case U: y--; break;
+    case D: y++; break;
+  }
+
+  // 撞牆檢查
+  if (x >= W || x < 0 || y >= H || y < 0) {
+    gameover = true;
+    playBeep(3136, 40);
+  }
+
+  // 撞自己檢查
+  for (let i = 0; i < ntl; i++) {
+    if (tx[i] === x && ty[i] === y) {
+      gameover = true;
+      playBeep(3136, 40);
+      return;
+    }
+  }
+
+  // 吃到食物
+  if (x === cx && y === cy) {
+    score += 1;
+    cx = Math.floor(Math.random() * (W - 2)) + 1;
+    cy = Math.floor(Math.random() * (H - 2)) + 1;
+
+    if (ntl > 0) {
+      tx[ntl] = tx[ntl - 1];
+      ty[ntl] = ty[ntl - 1];
+    } else {
+      tx[0] = x;
+      ty[0] = y;
+    }
+    ntl++;
+    playBeep(1200, 35);
+  }
+}
+
+// BFS 可用空間計算 (AI 用)
+function countFreeSpace(startX, startY) {
+  let visited = Array.from({ length: W }, () => new Array(H).fill(false));
+
+  for (let i = 0; i < W; i++) { visited[i][0] = true; visited[i][H - 1] = true; }
+  for (let j = 0; j < H; j++) { visited[0][j] = true; visited[W - 1][j] = true; }
+
+  for (let k = 0; k < ntl - 1; k++) {
+    if (tx[k] >= 0 && tx[k] < W && ty[k] >= 0 && ty[k] < H)
+      visited[tx[k]][ty[k]] = true;
+  }
+
+  let qx = new Array(2500), qy = new Array(2500);
+  let head = 0, tail = 0;
+
+  qx[tail] = startX; qy[tail] = startY;
+  visited[startX][startY] = true;
+  tail++;
+
+  let spaceCount = 0;
+  let dx = [0, 0, -1, 1];
+  let dy = [-1, 1, 0, 0];
+
+  while (head < tail) {
+    let cx_curr = qx[head], cy_curr = qy[head];
+    head++;
+    spaceCount++;
+
+    for (let i = 0; i < 4; i++) {
+      let nx = cx_curr + dx[i], ny = cy_curr + dy[i];
+      if (nx > 0 && nx < W - 1 && ny > 0 && ny < H - 1 && !visited[nx][ny]) {
+        visited[nx][ny] = true;
+        qx[tail] = nx; qy[tail] = ny;
+        tail++;
+      }
+    }
+  }
+  return spaceCount;
+}
+
+// AI 避障尋路邏輯
+function autoInput() {
+  let dx = [0, 0, -1, 1];
+  let dy = [-1, 1, 0, 0];
+
+  let bestDir = direction;
+  let minDistance = 999999;
+  let maxSpace = -1;
+  let foundSafePath = false;
+  let fallbackDir = -1;
+
+  for (let i = 0; i < 4; i++) {
+    if ((direction === U && i === 1) || (direction === D && i === 0) ||
+        (direction === L && i === 3) || (direction === R && i === 2)) continue;
+
+    let nx = x + dx[i];
+    let ny = y + dy[i];
+
+    if (nx <= 0 || nx >= W - 1 || ny <= 0 || ny >= H - 1) continue;
+
+    let hitTail = false;
+    for (let k = 0; k < ntl; k++) {
+      if (tx[k] === nx && ty[k] === ny) { hitTail = true; break; }
+    }
+    if (hitTail) continue;
+
+    if (fallbackDir === -1) fallbackDir = i;
+
+    let freeSpace = countFreeSpace(nx, ny);
+
+    if (freeSpace >= ntl + 1) {
+      let dist = Math.abs(nx - cx) + Math.abs(ny - cy);
+      if (dist < minDistance) {
+        minDistance = dist;
+        if (i === 0) bestDir = U;
+        if (i === 1) bestDir = D;
+        if (i === 2) bestDir = L;
+        if (i === 3) bestDir = R;
+        foundSafePath = true;
+      }
+    } else if (!foundSafePath) {
+      if (freeSpace > maxSpace) {
+        maxSpace = freeSpace;
+        if (i === 0) bestDir = U;
+        if (i === 1) bestDir = D;
+        if (i === 2) bestDir = L;
+        if (i === 3) bestDir = R;
+      }
+    }
+  }
+
+  if (!foundSafePath && maxSpace === -1 && fallbackDir !== -1) {
+    if (fallbackDir === 0) bestDir = U;
+    if (fallbackDir === 1) bestDir = D;
+    if (fallbackDir === 2) bestDir = L;
+    if (fallbackDir === 3) bestDir = R;
+  }
+
+  direction = bestDir;
+}
+
+// ESC 鍵處理機制
+function handleEsc() {
+  playBeep(3136, 40);
+  isEscExit = true;
+  exitChar = "a";
+  gameState = "LASTMO";
+  if (gameLoopTimer) clearTimeout(gameLoopTimer);
+  renderScreen();
+}
+
+// --- 遊戲主流程迴圈 ---
+
+function startFirstMo() {
+  gameState = "FIRSTMO";
+  cmdBuffer = "";
+  renderScreen();
+}
+
+function startDemoMode() {
+  setup();
+  isDemo = true;
+  gameState = "DEMO";
+  demoStartTime = Date.now();
+  runGameLoop();
+}
+
+function startManualMode() {
+  setup();
+  isDemo = false;
+  gameState = "MANUAL";
+  runGameLoop();
+}
+
+function runGameLoop() {
+  if (gameLoopTimer) clearTimeout(gameLoopTimer);
+
+  let cr_delay;
+
+  // 動態計算各模式加速邏輯
+  if (selectedMode === "NORMAL") {
+    // 一般版加速公式：d_t - score，最低 50ms
+    cr_delay = d_t - score;
+    if (cr_delay < 50) cr_delay = 50;
+  } else {
+    // 慢速版加速公式：d_t - Math.floor(score / 2)，最低 50ms
+    cr_delay = d_t - Math.floor(score / 2);
+    if (cr_delay < 50) cr_delay = 50;
+  }
+
+  if (gameState === "DEMO") {
+    let elapsed = (Date.now() - demoStartTime) / 1000;
+    if (elapsed >= demoTotalSeconds) {
+      // Demo 結束提示音
+      playBeep(800, 100);
+      setTimeout(() => playBeep(1200, 200), 100);
+
+      isDemo = false;
+      startManualMode();
+      return;
+    }
+
+    autoInput();
+    algorithm();
+
+    if (gameover) {
+      gameover = false; // Demo 防死機制
+    }
+
+    renderScreen();
+    gameLoopTimer = setTimeout(runGameLoop, cr_delay);
+  } 
+  else if (gameState === "MANUAL") {
+    renderScreen();
+
+    if (gameover) {
+      gameState = "LASTMO";
+      exitChar = "";
+      renderScreen();
+      return;
+    }
+
+    algorithm();
+    gameLoopTimer = setTimeout(runGameLoop, cr_delay);
+  }
+}
+
+// --- 鍵盤監聽處理 ---
+
+window.addEventListener("keydown", function (e) {
+  initAudio();
+  let key = e.key;
+
+  // 全域 Esc 處理
+  if (e.keyCode === 27) { // ESC
+    if (gameState !== "LASTMO") {
+      handleEsc();
+      return;
+    }
+  }
+
+  // 1. 遊戲說明與模式選擇頁面
+  if (gameState === "FIRSTMO") {
+    if (key === '1') {
+      selectedMode = "NORMAL";
+      d_t = 150;
+      playBeep(1000, 30);
+    } else if (key === '2') {
+      selectedMode = "SLOW";
+      d_t = 200;
+      playBeep(1000, 30);
+    }
+
+    if (e.keyCode === 13) { // Enter 鍵
+      if (cmdBuffer === "") {
+        startDemoMode();
+      } else if (cmdBuffer === "/passdemo/") {
+        startManualMode();
+      }
+    } else if (e.keyCode === 8) { // Backspace
+      if (cmdBuffer.length > 0) {
+        cmdBuffer = cmdBuffer.slice(0, -1);
+      }
+    } else if (key.length === 1 && key.charCodeAt(0) >= 32 && key.charCodeAt(0) <= 126 && key !== '1' && key !== '2') {
+      cmdBuffer += key;
+    }
+    renderScreen();
+    return;
+  }
+
+  // 2. 結束選單頁面邏輯
+  if (gameState === "LASTMO") {
+    let lowerKey = key.toLowerCase();
+
+    if (lowerKey === 'y') {
+      startManualMode();
+      return;
+    }
+    if (lowerKey === 'r') {
+      startFirstMo();
+      return;
+    }
+
+    if (e.keyCode === 13 && exitChar !== "") { // Enter 鍵離開遊戲
+      document.getElementById("screen").innerHTML = "\n\n再見，感謝遊玩！(請直接關閉此分頁)";
+      return;
+    }
+
+    if (e.keyCode === 8) { // Backspace
+      if (exitChar !== "") exitChar = "";
+      renderScreen();
+      return;
+    }
+
+    if (key.length === 1 && key.charCodeAt(0) >= 32 && key.charCodeAt(0) <= 126) {
+      exitChar = key;
+      renderScreen();
+    }
+    return;
+  }
+
+  // 3. 手動遊戲模式輸入邏輯
+  if (gameState === "MANUAL") {
+    let lowerKey = key.toLowerCase();
+    switch (lowerKey) {
+      case 'a': setdirection(L, R); break;
+      case 'd': setdirection(R, L); break;
+      case 'w': setdirection(U, D); break;
+      case 's': setdirection(D, U); break;
+      case 'p':
+        if (direction !== S) {
+          lastdirection = direction;
+          direction = S;
+        }
+        break;
+    }
+  }
+});
+
+// 啟動遊戲
+startFirstMo();
+</script>
+
+</body>
+</html>
